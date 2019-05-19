@@ -1,0 +1,29 @@
+#!/usr/bin/env bash
+set -eo pipefail
+
+DEST_ROOT="drive:backup/slack"
+
+[ $# = 1 ] || {
+  echo "usage: `basename $0` token" >&2
+  exit 2
+}
+tok_name=$1; shift
+
+echo using token of $tok_name
+token=`<tokens/$tok_name tr -d '\n'`
+
+tmp=`mktemp -d`
+echo backing up to $tmp
+docker run --rm \
+  -v "`cd "$tmp" && pwd`":/backup \
+  slack-backup --outdir /backup --token "$token"
+
+dest="$DEST_ROOT"/"$tok_name"/"`date -u +%Y%m%d%H%M%S`"
+echo mkdir $dest
+rclone mkdir "$dest"
+
+echo "copy $tmp => $dest"
+rclone copy "$tmp" "$dest"
+
+echo deleting $tmp
+rm -rf "$tmp"
