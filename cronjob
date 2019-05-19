@@ -12,7 +12,7 @@ tok_name=$1
   date \
     && cd "$root" \
     && bash -lc '
-      exec alerterr --name=slack-backup-'"$tok_name"' -- \
+      exec alerterr --name="slack-backup/'"$tok_name"'" --on_ok -- \
         flock "/tmp/slack_backup_'"$tok_name"'.lock" \
           ./main "$@"
     ' $0_c.sh "$@"

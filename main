@@ -18,7 +18,7 @@ docker run --rm \
   -v "`cd "$tmp" && pwd`":/backup \
   slack-backup --outdir /backup --token "$token"
 
-dest="$DEST_ROOT"/"$tok_name"/"`date -u +%Y%m%d%H%M%S`"
+dest="$DEST_ROOT/$tok_name/`date -u +%Y%m%d%H%M%S`"
 echo mkdir $dest
 rclone mkdir "$dest"
 
