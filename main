@@ -2,9 +2,10 @@
 set -eo pipefail
 
 DEST_ROOT="drive:backup/slack"
+FILES_ROOT="$HOME/windrive/backup/slack"
 
 [ $# = 1 ] || {
-  echo "usage: `basename $0` token" >&2
+  echo "usage: `basename $0` token_name" >&2
   exit 2
 }
 tok_name=$1; shift
@@ -24,6 +25,10 @@ rclone mkdir "$dest"
 
 echo "copy $tmp => $dest"
 rclone copy "$tmp" "$dest"
+
+files_dest="$FILES_ROOT/$tok_name/files"
+echo downloading files to $files_dest
+ruby dl_files.rb "$tmp" "$files_dest" "$token"
 
 echo deleting $tmp
 rm -rf "$tmp"
