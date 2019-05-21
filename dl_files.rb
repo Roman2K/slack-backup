@@ -52,7 +52,7 @@ class Locks
 end
 
 class Downloader
-  NTHREADS = 4
+  THREADS = 4
 
   def initialize(json_dir, out_dir, token, log)
     @json_dir, @out_dir, @token, @log = json_dir, out_dir, token, log
@@ -61,7 +61,7 @@ class Downloader
 
   def download_all
     q = Queue.new
-    threads = NTHREADS.times.map do
+    threads = THREADS.times.map do
       Thread.new do
         Thread.current.abort_on_exception = true
         while f = q.shift
@@ -88,49 +88,85 @@ class Downloader
 
     dest = File.join @out_dir, Digest::SHA1.hexdigest(f.raw_url)
     @locks.synchronize dest do
-      do_download f, dest, log
+      Download.new(f, dest, @token, log).perform
     end
   end
+end # Downloader
 
-  private def do_download(f, dest, log)
-    if File.file? dest
-      log[dest: dest].debug "already downloaded"
+class Download
+  ATTEMPTS = 3
+  FOLLOW_REDIRECTS = 3
+
+  def initialize(f, dest, token, log)
+    @f, @dest, @token, @log = f, dest, token, log
+  end
+
+  def perform
+    if File.file? @dest
+      @log[dest: @dest].debug "already downloaded"
       return
     end
-    log[dest: dest].debug "not already downloaded"
-    3.times do |i|
-      log[attempt: i].debug "sending request"
-      get_response f do |resp|
-        log[code: resp.code].debug "got response"
-        case resp.code[0]
-        when ?2
-          log.info "downloading" do
-            File.open(dest, 'w') { |f| resp.read_body { |c| f << c } }
-          end
-        when ?5
-          wait = 1+rand
-          log.debug "retrying in %.1fs" % [resp.code, wait]
-          sleep wait
-          next
-        else
-          log.public_method(f.private? ? :error : :warn).call "not available"
-          File.open(dest, 'w') { }
-        end
+    @log[dest: @dest].debug "not already downloaded"
+    ATTEMPTS.times do |i|
+      if i > 0
+        wait = 1+rand
+        @log.debug "retrying in %.1fs" % [wait]
+        sleep wait
+      end
+      @log[attempt: i+1].debug "sending request"
+      attempt and next
+      unless File.file? @dest
+        @log.debug "marking download as failed"
+        File.open(@dest, 'w') { }
       end
       break
     end
   end
 
-  private def get_response(f, &block)
-    host, port, ssl = f.uri.hostname, f.uri.port, f.uri.scheme == 'https'
+  private def attempt
+    FOLLOW_REDIRECTS.times do |i|
+      get_response do |resp|
+        @log[code: resp.code].debug "got response"
+        case resp.code
+        when "200"
+          @log.info "downloading" do
+            File.open(@dest, 'w') { |f| resp.read_body { |c| f << c } }
+          end
+          return
+        when /^2/
+          return
+        when "302", "301"
+          new_uri = URI resp["location"]
+          if new_uri == @f.uri
+            @log[location: uri].warn "not following redirection to current URL"
+            return
+          end
+          @f.uri = new_uri
+          @log = @log[url: @f.uri]
+          @log[location: @f.uri, redir_count: i+1].debug "following redirection"
+          # no return, attempt with new URL at the next iteration
+        when /^3/, "404"
+          @log.public_method(@f.private? ? :error : :warn).call "unavailable"
+          return
+        else
+          return true
+        end
+      end
+    end
+    @log.warn "too many redirects"
+    false
+  end
+
+  private def get_response(&block)
+    host, port, ssl = @f.uri.hostname, @f.uri.port, @f.uri.scheme == 'https'
     headers = {}.tap do |h|
-      h["Authorization"] = "Bearer #{@token}" if f.private?
+      h["Authorization"] = "Bearer #{@token}" if @f.private?
     end
     Net::HTTP.start host, port, use_ssl: ssl do |http|
-      http.request_get f.uri.path, headers, &block
+      http.request_get @f.uri.path, headers, &block
     end
   end
-end # Downloader
+end # Download
 
 if $0 == __FILE__
   log = Log.new $stderr, level: :info
