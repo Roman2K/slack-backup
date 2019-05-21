@@ -114,12 +114,11 @@ class Download
         sleep wait
       end
       @log[attempt: i+1].debug "sending request"
-      attempt and next
-      unless File.file? @dest
-        @log.debug "marking download as failed"
-        File.open(@dest, 'w') { }
-      end
-      break
+      attempt or break
+    end
+    unless File.file? @dest
+      @log.debug "marking download as failed"
+      File.open(@dest, 'w') { }
     end
   end
 
@@ -142,8 +141,8 @@ class Download
             return
           end
           @f.uri = new_uri
-          @log = @log[url: @f.uri]
           @log[location: @f.uri, redir_count: i+1].debug "following redirection"
+          @log = @log[url: @f.uri]
           # no return, attempt with new URL at the next iteration
         when /^3/, "404"
           @log.public_method(@f.private? ? :error : :warn).call "unavailable"
@@ -155,6 +154,16 @@ class Download
     end
     @log.warn "too many redirects"
     false
+  rescue RequestError
+    @log[err: $!].warn "request error"
+    true
+  end
+
+  class RequestError < StandardError
+    def to_s
+      e = cause
+      "cause: %s: %s" % [e.class, e]
+    end
   end
 
   private def get_response(&block)
@@ -162,8 +171,15 @@ class Download
     headers = {}.tap do |h|
       h["Authorization"] = "Bearer #{@token}" if @f.private?
     end
-    Net::HTTP.start host, port, use_ssl: ssl do |http|
-      http.request_get @f.uri.path, headers, &block
+    http = begin
+      Net::HTTP.start host, port, use_ssl: ssl
+    rescue Errno::ECONNREFUSED, Errno::ECONNRESET, SocketError
+      raise RequestError
+    end
+    begin
+      http.request_get @f.uri, headers, &block
+    ensure
+      http.finish
     end
   end
 end # Download
