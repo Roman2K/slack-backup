@@ -58,20 +58,20 @@ class Log
       return
     end
 
-    @lock.printing = true
-    msg << "..."
-    @io.print msg
+    @lock.printing! do
+      msg << "..."
+      @io.print msg
 
-    t0 = Time.now
-    yield.tap do
-      time = " %.2fs" % [Time.now - t0]
-      if @lock.cur_id == id
-        msg = time
-      else
-        msg << time
+      t0 = Time.now
+      yield.tap do
+        time = " %.2fs" % [Time.now - t0]
+        if @lock.cur_id == id
+          msg = time
+        else
+          msg << time
+        end
+        @io.print msg, "\n"
       end
-      @io.print msg, "\n"
-      @lock.printing = false
     end
   end
 
@@ -83,7 +83,7 @@ class Log
 
   class Lock
     def initialize
-      @printing = false
+      @printing = 0
       @id = 0
       @mu = Mutex.new
     end
@@ -99,9 +99,17 @@ class Log
       end
     end
 
-    sync def printing?; @printing end
-    sync def printing=(b); @printing = b end
     sync def next!; @id += 1 end
     sync def cur_id; @id end
+    sync def printing?; @printing > 0 end
+
+    def printing!
+      @mu.synchronize { @printing += 1 }
+      begin
+        yield
+      ensure
+        @mu.synchronize { @printing -= 1 }
+      end
+    end
   end
 end
