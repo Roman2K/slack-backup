@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+set -eo pipefail
+
+{
+  ls tokens | xargs -n1 -P1 ./cronjob
+} 2>&1 | tee /tmp/slack_backup_all.log
