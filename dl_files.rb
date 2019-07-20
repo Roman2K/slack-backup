@@ -86,7 +86,7 @@ class Downloader
     log[visibility: f.private? ? "PRIVATE" : "PUBLIC"].
       debug "checking whether to download"
 
-    dest = File.join @out_dir, Digest::SHA1.hexdigest(f.raw_url)
+    dest = File.join @out_dir, Digest(:SHA1).hexdigest(f.raw_url)
     @locks.synchronize dest do
       Download.new(f, dest, @token, log).perform
     end
