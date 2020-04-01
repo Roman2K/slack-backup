@@ -2,7 +2,12 @@
 set -eo pipefail
 
 DEST_ROOT="drive:backup/slack"
-FILES_ROOT="$HOME/windrive/backup/slack"
+windrive="$HOME/windrive"
+if ! mountpoint "$windrive"; then
+  echo "$windrive is not mounted" >&2
+  exit 1
+fi
+FILES_ROOT="$windrive/backup/slack"
 
 [ $# = 1 ] || {
   echo "usage: `basename $0` token_name" >&2
@@ -27,8 +32,9 @@ echo "copy $tmp => $dest"
 rclone copy "$tmp" "$dest"
 
 files_dest="$FILES_ROOT/$tok_name/files"
+mkdir -p "$files_dest"
 echo downloading files to $files_dest
-ruby dl_files.rb "$tmp" "$files_dest" "$token"
+bundle exec ruby dl_files.rb "$tmp" "$files_dest" "$token"
 
 echo deleting $tmp
 rm -rf "$tmp"

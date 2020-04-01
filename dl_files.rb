@@ -2,7 +2,7 @@ require 'pathname'
 require 'json'
 require 'digest'
 require 'net/http'
-require_relative 'log'
+require 'utils'
 
 SlackFile = Struct.new :raw_url, :uri, :private? do
   def self.grep(obj, &block)
@@ -54,9 +54,11 @@ end
 class Downloader
   THREADS = 4
 
-  def initialize(json_dir, out_dir, token, log)
-    @json_dir, @out_dir, @token, @log = json_dir, out_dir, token, log
+  def initialize(json_dir, out_dir, token, log:)
+    @json_dir, @out_dir, @token = json_dir, out_dir, token
+    @log = log
     @locks = Locks.new
+    @fails = Set.new
   end
 
   def download_all
@@ -86,9 +88,18 @@ class Downloader
     log[visibility: f.private? ? "PRIVATE" : "PUBLIC"].
       debug "checking whether to download"
 
-    dest = File.join @out_dir, Digest(:SHA1).hexdigest(f.raw_url)
-    @locks.synchronize dest do
-      Download.new(f, dest, @token, log).perform
+    id = Digest(:SHA1).hexdigest(f.raw_url)
+    @locks.synchronize id do
+      if @fails.include? id
+        log.debug "skipping download previously failed in this process"
+        break
+      end
+      begin
+        Download.new(f, File.join(@out_dir, id), @token, log).perform
+      rescue Download::RequestError
+        log.warn "failed to download, will retry"
+        @fails << id
+      end
     end
   end
 end # Downloader
@@ -107,15 +118,14 @@ class Download
       return
     end
     @log[dest: @dest].debug "not already downloaded"
-    ATTEMPTS.times do |i|
-      if i > 0
-        wait = 1+rand
-        @log.debug "retrying in %.1fs" % [wait]
-        sleep wait
-      end
-      @log[attempt: i+1].debug "sending request"
-      attempt or break
-    end
+    Utils::Retrier.new(ATTEMPTS, RequestError).tap { |r|
+      r.wait = -> { 1 + rand }
+      r.on_err = -> err { @log[err: err].warn "request error" }
+      r.before_wait = -> wait { @log.debug "retrying in %.1fs" % [wait] }
+    }.attempt { |n|
+      @log[attempt: n].debug "sending request"
+      attempt
+    }
     unless File.file? @dest
       @log.debug "marking download as failed"
       File.open(@dest, 'w') { }
@@ -125,37 +135,40 @@ class Download
   private def attempt
     FOLLOW_REDIRECTS.times do |i|
       get_response do |resp|
-        @log[code: resp.code].debug "got response"
-        case resp.code
-        when "200"
-          @log.info "downloading" do
-            File.open(@dest, 'w') { |f| resp.read_body { |c| f << c } }
-          end
-          return
-        when /^2/
-          return
-        when "302", "301"
-          new_uri = URI resp["location"]
-          if new_uri == @f.uri
-            @log[location: uri].warn "not following redirection to current URL"
-            return
-          end
-          @f.uri = new_uri
-          @log[location: @f.uri, redir_count: i+1].debug "following redirection"
-          @log = @log[url: @f.uri]
-          # no return, attempt with new URL at the next iteration
-        when /^3/, "404"
-          @log.public_method(@f.private? ? :error : :warn).call "unavailable"
-          return
-        else
-          return true
-        end
+        download(resp, redir_count: i+1) and return
       end
     end
     @log.warn "too many redirects"
-    false
-  rescue RequestError
-    @log[err: $!].warn "request error"
+  end
+
+  private def download(resp, redir_count:)
+    @log[code: resp.code].debug "got response"
+    case resp.code
+    when "200"
+      @log.info "downloading" do
+        File.open(@dest, 'w') { |f| resp.read_body { |c| f << c } }
+      rescue
+        begin
+          File.delete @dest
+        rescue
+          @log[err: $!].debug "failed to delete after failed download"
+        end
+        raise
+      end
+    when "302", "301"
+      new_uri = URI resp["location"]
+      if new_uri == @f.uri
+        @log[location: uri].warn "not following redirection to current URL"
+        return true
+      end
+      @f.uri = new_uri
+      @log[location: @f.uri, redir_count: redir_count].
+        debug "following redirection"
+      @log = @log[url: @f.uri]
+      return false  # caller should attempt with new URL
+    when /^3/, "404"
+      @log.public_method(@f.private? ? :error : :warn).call "unavailable"
+    end
     true
   end
 
@@ -166,31 +179,37 @@ class Download
     end
   end
 
+  TIMEOUTS = {}.tap do |h|
+    %i[open ssl write read].each do |ev|
+      h[:"#{ev}_timeout"] = 15
+    end
+  end
+
   private def get_response(&block)
     host, port, ssl = @f.uri.hostname, @f.uri.port, @f.uri.scheme == 'https'
     headers = {}.tap do |h|
       h["Authorization"] = "Bearer #{@token}" if @f.private?
     end
-    http = begin
-      Net::HTTP.start host, port, use_ssl: ssl
-    rescue Errno::ECONNREFUSED, Errno::ECONNRESET, SocketError
-      raise RequestError
-    end
     begin
-      http.request_get @f.uri, headers, &block
-    ensure
-      http.finish
+      http = Net::HTTP.start host, port, use_ssl: ssl, **TIMEOUTS
+      begin
+        http.request_get @f.uri, headers, &block
+      ensure
+        http.finish
+      end
+    rescue Errno::ECONNREFUSED, Errno::ECONNRESET, SocketError, Timeout::Error
+      raise RequestError
     end
   end
 end # Download
 
 if $0 == __FILE__
-  log = Log.new $stderr, level: :info
-  log.level = :debug if ARGV.delete "-v"
+  log = Utils::Log.new $stderr, level: :info
+  log.level = :debug if ENV["DEBUG"] == "1"
   log[level: log.level].info "set log level"
 
   ARGV.size == 3 or raise ArgumentError,
     "usage: #{File.basename $0} json_dir out_dir token"
 
-  Downloader.new(*ARGV, log).download_all
+  Downloader.new(*ARGV, log: log).download_all
 end
