@@ -10,24 +10,22 @@ SlackFile = Struct.new :raw_url, :uri, :private? do
     when Array then obj.each { |el| grep el, &block }
     when Hash then obj.each_value { |el| grep el, &block }
     else
-      if sf = SlackFile.match(obj)
+      if sf = match(obj)
         yield sf
       end
     end
   end
 
   def self.match(s)
-    s =~ %r{^http(s)?://}i or return
-    secure = !!$1
-
     uri = begin
       URI s
     rescue ArgumentError, URI::InvalidURIError
       return
     end
+    URI::HTTP === uri or return
 
     case
-    when secure && uri.host == "files.slack.com"
+    when URI::HTTPS === uri && uri.host == "files.slack.com"
       self[s, uri, true]
     when uri.host =~ /\.slack\.com$/
       nil
@@ -155,15 +153,21 @@ class Download
         end
         raise
       end
+      @log.info "downloaded"
     when "302", "301"
       new_uri = URI resp["location"]
+      new_uri = Utils.merge_uri @f.uri, new_uri if URI::Generic === new_uri
+      loc_log = @log[location: new_uri]
+      unless URI::HTTP === new_uri
+        loc_log.warn "not following redirection to non-HTTP URL"
+        return true
+      end
       if new_uri == @f.uri
-        @log[location: uri].warn "not following redirection to current URL"
+        loc_log.warn "not following redirection to current URL"
         return true
       end
       @f.uri = new_uri
-      @log[location: @f.uri, redir_count: redir_count].
-        debug "following redirection"
+      loc_log[redir_count: redir_count].debug "following redirection"
       @log = @log[url: @f.uri]
       return false  # caller should attempt with new URL
     when /^3/, "404"

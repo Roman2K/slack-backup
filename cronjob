@@ -14,7 +14,7 @@ tok_name=$1
     && bash -lc '
       exec alerterr \
         --name="slack-backup/'"$tok_name"'" \
-        --on_err=ERROR --on_err="/INFO.*downloading/" -- \
+        --on_err=ERROR --on_err="/INFO.*downloaded/" --no-on_log -- \
         flock "/tmp/slack_backup_'"$tok_name"'.lock" \
           ./main "$@"
     ' $0_c.sh "$@"
