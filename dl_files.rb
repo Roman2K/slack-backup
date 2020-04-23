@@ -95,7 +95,7 @@ class Downloader
       begin
         Download.new(f, File.join(@out_dir, id), @token, log).perform
       rescue Download::RequestError
-        log.warn "failed to download, will retry"
+        log.warn "download failed"
         @fails << id
       end
     end
@@ -105,17 +105,26 @@ end # Downloader
 class Download
   ATTEMPTS = 3
   FOLLOW_REDIRECTS = 3
+  MAX_RETRY_TIME = 2 * 24 * 3600
 
   def initialize(f, dest, token, log)
-    @f, @dest, @token, @log = f, dest, token, log
+    @f = f
+    @dest = Pathname dest
+    @token = token
+    @log = log
+    @err_dest = @dest.dirname.join "#{@dest.basename}.err"
   end
 
   def perform
-    if File.file? @dest
+    if @dest.file?
       @log[dest: @dest].debug "already downloaded"
       return
     end
     @log[dest: @dest].debug "not already downloaded"
+    attempt_with_retries
+  end
+
+  private def attempt_with_retries
     Utils::Retrier.new(ATTEMPTS, RequestError).tap { |r|
       r.wait = -> { 1 + rand }
       r.on_err = -> err { @log[err: err].warn "request error" }
@@ -124,9 +133,49 @@ class Download
       @log[attempt: n].debug "sending request"
       attempt
     }
-    unless File.file? @dest
-      @log.debug "marking download as failed"
-      File.open(@dest, 'w') { }
+  rescue RequestError
+    # Failed downloaded: upcoming retry or mark as failed
+    begin
+      st = @err_dest.stat
+    rescue Errno::ENOENT
+      @log.debug "first download error, will retry"
+      touch_dest @err_dest
+    else
+      if (time_left = MAX_RETRY_TIME - (Time.now - st.ctime)) > 0
+        @log[time_left: Utils::Fmt.duration(time_left)].
+          debug "download failed again, will retry"
+      else
+        @log.debug "marking download as permanently failed"
+        delete_err_dest
+        touch_dest
+      end
+    end
+    raise
+  else
+    # Failed download for non-network related reasons
+    if !@dest.file?
+      @log.debug "output file not found: failed for non-network related reasons"
+      touch_dest
+      return
+    end
+
+    # Successful download
+    @log.debug "output file found"
+    delete_err_dest
+  end
+
+  private def touch_dest(f=@dest)
+    f.open('w') { }
+  end
+
+  private def delete_err_dest
+    log = @log[err_dest: @err_dest]
+    begin
+      @err_dest.delete
+    rescue Errno::ENOENT
+      log.debug "attempted to delete inexistent err file"
+    else
+      log.debug "deleted err file"
     end
   end
 
@@ -144,10 +193,10 @@ class Download
     case resp.code
     when "200"
       @log.info "downloading" do
-        File.open(@dest, 'w') { |f| resp.read_body { |c| f << c } }
+        @dest.open('w') { |f| resp.read_body { |c| f << c } }
       rescue
         begin
-          File.delete @dest
+          @dest.delete
         rescue
           @log[err: $!].debug "failed to delete after failed download"
         end
@@ -170,8 +219,9 @@ class Download
       loc_log[redir_count: redir_count].debug "following redirection"
       @log = @log[url: @f.uri]
       return false  # caller should attempt with new URL
-    when /^3/, "404"
-      @log.public_method(@f.private? ? :error : :warn).call "unavailable"
+    else
+      @log[status: resp.code].public_method(@f.private? ? :error : :warn).
+        call "unavailable"
     end
     true
   end
@@ -189,6 +239,12 @@ class Download
     end
   end
 
+  CONN_ERRORS = [
+    Errno::ECONNREFUSED, Errno::ECONNRESET,
+    SocketError, Timeout::Error,
+    OpenSSL::SSL::SSLError,
+  ]
+
   private def get_response(&block)
     host, port, ssl = @f.uri.hostname, @f.uri.port, @f.uri.scheme == 'https'
     headers = {}.tap do |h|
@@ -201,7 +257,7 @@ class Download
       ensure
         http.finish
       end
-    rescue Errno::ECONNREFUSED, Errno::ECONNRESET, SocketError, Timeout::Error
+    rescue *CONN_ERRORS
       raise RequestError
     end
   end
