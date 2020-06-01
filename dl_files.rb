@@ -138,14 +138,14 @@ class Download
     begin
       st = @err_dest.stat
     rescue Errno::ENOENT
-      @log.debug "first download error, will retry"
+      @log.warn "first download error, will retry"
       touch_dest @err_dest
     else
       if (time_left = MAX_RETRY_TIME - (Time.now - st.ctime)) > 0
         @log[time_left: Utils::Fmt.duration(time_left)].
-          debug "download failed again, will retry"
+          warn "download failed again, will retry"
       else
-        @log.debug "marking download as permanently failed"
+        @log.warn "marking download as permanently failed"
         delete_err_dest
         touch_dest
       end
@@ -154,7 +154,7 @@ class Download
   else
     # Failed download for non-network related reasons
     if !@dest.file?
-      @log.debug "output file not found: failed for non-network related reasons"
+      @log.warn "output file not found: failed for non-network related reasons"
       touch_dest
       return
     end
@@ -204,8 +204,7 @@ class Download
       end
       @log.info "downloaded"
     when "302", "301"
-      new_uri = URI resp["location"]
-      new_uri = Utils.merge_uri @f.uri, new_uri if URI::Generic === new_uri
+      new_uri = @f.uri.merge resp.fetch("location")
       loc_log = @log[location: new_uri]
       unless URI::HTTP === new_uri
         loc_log.warn "not following redirection to non-HTTP URL"
